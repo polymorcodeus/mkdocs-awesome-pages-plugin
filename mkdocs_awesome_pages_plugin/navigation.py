@@ -4,7 +4,7 @@ from pathlib import Path
 import mkdocs.utils
 import mkdocs.utils.meta
 from natsort import natsort_keygen
-from typing import List, Optional, Union, Set, Dict
+from typing import List, Optional, Union, Set, Dict, Any, Mapping, Union, TYPE_CHECKING, Iterator, Type, TypeVar
 
 from mkdocs.structure.nav import (
     Navigation as MkDocsNavigation,
@@ -12,12 +12,23 @@ from mkdocs.structure.nav import (
     Link,
     _add_parent_links,
     _add_previous_and_next_links,
+    _data_to_navigation, 
+    _get_by_type,  
 )
 from mkdocs.structure.pages import Page
+from mkdocs.structure.files import Files
+from mkdocs.utils import nest_paths
+from mkdocs.config.defaults import MkDocsConfig
+
+import logging
+log = logging.getLogger(__name__)
+from urllib.parse import urlsplit
+
 
 from .meta import Meta, MetaNavItem, MetaNavRestItem, RestItemList
 from .options import Options
 from .utils import dirname, basename, join_paths
+
 
 NavigationItem = Union[Page, Section, Link]
 
@@ -266,6 +277,51 @@ def get_by_type(nav, T):
             ret.extend(get_by_type(item.children, T))
     return ret
 
+def get_awesome_navigation(files: Files, config: Union[MkDocsConfig, Mapping[str, Any]]) -> MkDocsNavigation:
+    """Build site navigation from config and files."""
+    nav_config = nest_paths(f.src_uri for f in files.documentation_pages())
+    items = _data_to_navigation(nav_config, files, config)
+    if not isinstance(items, list):
+        items = [items]
+
+    # Get only the pages from the navigation, ignoring any sections and links.
+    pages = _get_by_type(items, Page)
+
+    # Include next, previous and parent links.
+    _add_previous_and_next_links(pages)
+    _add_parent_links(items)
+
+    missing_from_config = [file for file in files.documentation_pages() if file.page is None]
+    if missing_from_config:
+        log.info(
+            'The following pages exist in the docs directory, but are not '
+            'included in the "nav" configuration:\n  - {}'.format(
+                '\n  - '.join(file.src_path for file in missing_from_config)
+            )
+        )
+        # Any documentation files not found in the nav should still have an associated page, so we
+        # create them here. The Page object will automatically be assigned to `file.page` during
+        # its creation (and this is the only way in which these page objects are accessible).
+        for file in missing_from_config:
+            Page(None, file, config)
+
+    links = _get_by_type(items, Link)
+    for link in links:
+        scheme, netloc, path, query, fragment = urlsplit(link.url)
+        if scheme or netloc:
+            log.debug(f"An external link to '{link.url}' is included in the 'nav' configuration.")
+        elif link.url.startswith('/'):
+            log.debug(
+                f"An absolute path to '{link.url}' is included in the 'nav' "
+                "configuration, which presumably points to an external resource."
+            )
+        else:
+            msg = (
+                f"A relative path to '{link.url}' is included in the 'nav' "
+                "configuration, which is not found in the documentation files"
+            )
+            log.warning(msg)
+    return MkDocsNavigation(items, pages)
 
 # Copy of mkdocs.structure.pages.Page._set_title and Page.read_source
 def get_title(item: NavigationItem) -> str:

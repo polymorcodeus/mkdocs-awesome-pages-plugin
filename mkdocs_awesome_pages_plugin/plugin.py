@@ -13,7 +13,7 @@ from mkdocs.structure.nav import (
 from mkdocs.structure.pages import Page
 
 from .meta import DuplicateRestItemError, MetaNavRestItem, RestItemList
-from .navigation import AwesomeNavigation, get_by_type, NavigationItem
+from .navigation import AwesomeNavigation, get_by_type, NavigationItem, get_awesome_navigation
 from .options import Options
 
 
@@ -28,6 +28,7 @@ class NavPluginOrder(Warning):
 
 
 class AwesomePagesPlugin(BasePlugin):
+
     DEFAULT_META_FILENAME = ".pages"
     REST_PLACEHOLDER = "AWESOME_PAGES_REST"
 
@@ -35,29 +36,33 @@ class AwesomePagesPlugin(BasePlugin):
         ("filename", config_options.Type(str, default=DEFAULT_META_FILENAME)),
         ("collapse_single_pages", config_options.Type(bool, default=False)),
         ("strict", config_options.Type(bool, default=True)),
-        ("order", config_options.Choice(["asc", "desc"], default=None)),
-        ("sort_type", config_options.Choice(["natural"], default=None)),
-        ("order_by", config_options.Choice(["filename", "title"], default=None)),
     )
 
     def __init__(self):
         self.nav_config_with_rest = None
         self.rest_items = RestItemList()
         self.rest_blocks = {}
+        self.rest_dict = {}
 
     def on_nav(self, nav: MkDocsNavigation, config: Config, files: Files):
-        explicit_nav = nav if config["nav"] else None
-
+        explicit_nav = nav if not config["nav"] else None
+        
         if self.nav_config_with_rest:
             # restore explicit config with rest placeholder and build nav
             config["nav"] = self.nav_config_with_rest
+            awesome_nav = get_awesome_navigation(files, config)
+            
             explicit_nav = get_navigation(files, config)
 
+            for key, value in self.rest_dict.items(): # Add "rest sections" back to nav
+                rest_link = Link(AwesomePagesPlugin.REST_PLACEHOLDER, value)
+                explicit_nav.items.insert(key, rest_link)
+            
         explicit_sections = set(get_by_type(explicit_nav, Section)) if explicit_nav else set()
 
         if self.nav_config_with_rest:
-            self.rest_blocks = self._generate_rest_blocks(nav.items, [page.file for page in explicit_nav.pages])
-            self._insert_rest(explicit_nav.items)
+            self.rest_blocks = self._generate_rest_blocks(awesome_nav.items, [page.file for page in explicit_nav.pages])
+            self._insert_rest(explicit_nav.items) 
             nav = explicit_nav
 
         return AwesomeNavigation(nav.items, Options(**self.config), config["docs_dir"], explicit_sections).to_mkdocs()
@@ -73,8 +78,17 @@ class AwesomePagesPlugin(BasePlugin):
             self._find_rest(config["nav"])
             if self.rest_items:
                 self.nav_config_with_rest = config["nav"]
-                config["nav"] = None  # clear nav to prevent MkDocs from reporting files that are not included
 
+                self.temp_nav_config = config["nav"]
+
+                for index,item in enumerate(config["nav"]):
+                    if type(item) is dict: 
+                        if AwesomePagesPlugin.REST_PLACEHOLDER in item:
+                            self.rest_dict.update({index:item[AwesomePagesPlugin.REST_PLACEHOLDER]})
+                            self.temp_nav_config.pop(index)
+
+                config["nav"] = self.temp_nav_config  # Leave non "rest-like" nav, namely for Blog validation
+                
         return config
 
     def _find_rest(self, config):
